@@ -20,6 +20,7 @@ async function run() {
     await syncOnce();
   } catch (error) {
     console.error('Failed to sync timetable', error);
+    if (RUN_ONCE) process.exitCode = 1;
   }
 
   if (RUN_ONCE) return;

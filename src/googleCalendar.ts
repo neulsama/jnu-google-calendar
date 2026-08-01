@@ -31,6 +31,14 @@ class GoogleApiError extends Error {
   }
 }
 
+function redactGoogleApiDetails(value: string) {
+  return [GOOGLE_CALENDAR_ID, encodeURIComponent(GOOGLE_CALENDAR_ID)].reduce(
+    (redacted, sensitiveValue) =>
+      redacted.split(sensitiveValue).join('[redacted]'),
+    value
+  );
+}
+
 const base64Url = (input: Buffer | string) =>
   Buffer.from(input)
     .toString('base64')
@@ -106,7 +114,11 @@ async function googleRequest(path: string, init: RequestInit = {}) {
 
       if (!response.ok) {
         const body = await response.text();
-        throw new GoogleApiError(response.status, body, path);
+        throw new GoogleApiError(
+          response.status,
+          redactGoogleApiDetails(body),
+          redactGoogleApiDetails(path)
+        );
       }
 
       return response;
@@ -194,7 +206,10 @@ function isSameEvent(
   );
 }
 
-async function upsertEvents(events: ReturnType<typeof buildCalendarEvents>) {
+async function upsertEvents(
+  events: ReturnType<typeof buildCalendarEvents>,
+  remoteById: Map<string, CalendarEventLite>
+) {
   const calendarId = encodeURIComponent(GOOGLE_CALENDAR_ID);
   let inserted = 0;
 
@@ -214,10 +229,27 @@ async function upsertEvents(events: ReturnType<typeof buildCalendarEvents>) {
       },
     };
 
-    await googleRequest(`calendars/${calendarId}/events/${eventId}`, {
-      method: 'PUT',
-      body: JSON.stringify(body),
-    });
+    if (remoteById.has(eventId)) {
+      await googleRequest(`calendars/${calendarId}/events/${eventId}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      });
+    } else {
+      try {
+        await googleRequest(`calendars/${calendarId}/events`, {
+          method: 'POST',
+          body: JSON.stringify({ id: eventId, ...body }),
+        });
+      } catch (error) {
+        if (!(error instanceof GoogleApiError) || error.status !== 409)
+          throw error;
+
+        await googleRequest(`calendars/${calendarId}/events/${eventId}`, {
+          method: 'PUT',
+          body: JSON.stringify(body),
+        });
+      }
+    }
     inserted += 1;
   }
 
@@ -263,7 +295,7 @@ export async function syncGoogleCalendar(lectures: Lecture[]) {
     return !isSameEvent(remoteEvent, event);
   });
 
-  const inserted = await upsertEvents(changedEvents);
+  const inserted = await upsertEvents(changedEvents, remoteById);
   const deleted = await deleteStaleEvents(remoteEvents, events);
 
   return { inserted, deleted };
